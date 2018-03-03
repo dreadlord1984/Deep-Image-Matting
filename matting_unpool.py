@@ -1,32 +1,29 @@
-'''
-unpool_v1.py
-replace deconv with unpooling
-'''
 import tensorflow as tf
 import numpy as np
 from matting import load_path,load_data,load_alphamatting_data,load_validation_data,unpool
 import os
 from scipy import misc
+os.environ['CUDA_VISIBLE_DEVICES']='0'
 
 image_size = 320
 train_batch_size = 1
 max_epochs = 1000000
-hard_mode = True
+hard_mode = False
 
 #checkpoint file path
-pretrained_model = './model/model.ckpt'
+pretrained_model = False
 #pretrained_model = False
 test_dir = './alhpamatting'
 test_outdir = './test_predict'
-validation_dir = '/data/gezheng/data-matting/new2/validation'
+#validation_dir = '/data/gezheng/data-matting/new2/validation'
 
 #pretrained_vgg_model_path
 model_path = './vgg16_weights.npz'
-log_dir = '/data/gezheng/matting_log'
+log_dir = 'matting_log'
 
-dataset_alpha = '/data/gezheng/data-matting/new2/alpha1280'
-dataset_eps = '/data/gezheng/data-matting/new2/eps1280'
-dataset_BG = '/data/gezheng/data-matting/new2/BG'
+dataset_alpha = 'train_data/alpha'
+dataset_eps = 'train_data/eps'
+dataset_BG = 'train_data/bg'
 
 paths_alpha,paths_eps,paths_BG = load_path(dataset_alpha,dataset_eps,dataset_BG,hard_mode = hard_mode)
 
@@ -38,12 +35,17 @@ batchs_per_epoch = int(range_size/train_batch_size)
 index_queue = tf.train.range_input_producer(range_size, num_epochs=None,shuffle=True, seed=None, capacity=32)
 index_dequeue_op = index_queue.dequeue_many(train_batch_size, 'index_dequeue')
 
-image_batch = tf.placeholder(tf.float32, shape=(1,image_size,image_size,3))
-raw_RGBs = tf.placeholder(tf.float32, shape=(1,image_size,image_size,3))
-GT_matte_batch = tf.placeholder(tf.float32, shape = (1,image_size,image_size,1))
-GT_trimap = tf.placeholder(tf.float32, shape = (1,image_size,image_size,1))
-GTBG_batch = tf.placeholder(tf.float32, shape = (1,image_size,image_size,3))
-GTFG_batch = tf.placeholder(tf.float32, shape = (1,image_size,image_size,3))
+image_batch = tf.placeholder(tf.float32, shape=(train_batch_size,image_size,image_size,3))
+raw_RGBs = tf.placeholder(tf.float32, shape=(train_batch_size,image_size,image_size,3))
+GT_matte_batch = tf.placeholder(tf.float32, shape = (train_batch_size,image_size,image_size,1))
+GT_trimap = tf.placeholder(tf.float32, shape = (train_batch_size,image_size,image_size,1))
+GTBG_batch = tf.placeholder(tf.float32, shape = (train_batch_size,image_size,image_size,3))
+GTFG_batch = tf.placeholder(tf.float32, shape = (train_batch_size,image_size,image_size,3))
+training = tf.placeholder(tf.bool)
+
+tf.add_to_collection('image_batch',image_batch)
+tf.add_to_collection('GT_trimap',GT_trimap)
+tf.add_to_collection('training',training)
 
 en_parameters = []
 pool_parameters = []
@@ -85,6 +87,7 @@ with tf.name_scope('conv1_2') as scope:
 # pool1
 pool1,arg1 = tf.nn.max_pool_with_argmax(conv1_2,ksize=[1, 2, 2, 1],strides=[1, 2, 2, 1],padding='SAME',name='pool1')
 pool_parameters.append(arg1)
+
 # conv2_1
 with tf.name_scope('conv2_1') as scope:
     kernel = tf.Variable(tf.truncated_normal([3, 3, 64, 128], dtype=tf.float32,
@@ -110,6 +113,7 @@ with tf.name_scope('conv2_2') as scope:
 # pool2
 pool2,arg2 = tf.nn.max_pool_with_argmax(conv2_2,ksize=[1, 2, 2, 1],strides=[1, 2, 2, 1],padding='SAME',name='pool2')
 pool_parameters.append(arg2)
+
 # conv3_1
 with tf.name_scope('conv3_1') as scope:
     kernel = tf.Variable(tf.truncated_normal([3, 3, 128, 256], dtype=tf.float32,
@@ -146,6 +150,7 @@ with tf.name_scope('conv3_3') as scope:
 # pool3
 pool3,arg3 = tf.nn.max_pool_with_argmax(conv3_3,ksize=[1, 2, 2, 1],strides=[1, 2, 2, 1],padding='SAME',name='pool3')
 pool_parameters.append(arg3)
+
 # conv4_1
 with tf.name_scope('conv4_1') as scope:
     kernel = tf.Variable(tf.truncated_normal([3, 3, 256, 512], dtype=tf.float32,
@@ -182,6 +187,7 @@ with tf.name_scope('conv4_3') as scope:
 # pool4
 pool4,arg4 = tf.nn.max_pool_with_argmax(conv4_3,ksize=[1, 2, 2, 1],strides=[1, 2, 2, 1],padding='SAME',name='pool4')
 pool_parameters.append(arg4)
+
 # conv5_1
 with tf.name_scope('conv5_1') as scope:
     kernel = tf.Variable(tf.truncated_normal([3, 3, 512, 512], dtype=tf.float32,
@@ -220,28 +226,27 @@ pool5,arg5 = tf.nn.max_pool_with_argmax(conv5_3,ksize=[1, 2, 2, 1],strides=[1, 2
 pool_parameters.append(arg5)
 # conv6_1
 with tf.name_scope('conv6_1') as scope:
-    kernel = tf.Variable(tf.truncated_normal([3, 3, 512, 512], dtype=tf.float32,
+    kernel = tf.Variable(tf.truncated_normal([7, 7, 512, 4096], dtype=tf.float32,
                                              stddev=1e-1), name='weights')
     conv = tf.nn.conv2d(pool5, kernel, [1, 1, 1, 1], padding='SAME')
-    biases = tf.Variable(tf.constant(0.0, shape=[512], dtype=tf.float32),
+    biases = tf.Variable(tf.constant(0.0, shape=[4096], dtype=tf.float32),
                          trainable=True, name='biases')
     out = tf.nn.bias_add(conv, biases)
     conv6_1 = tf.nn.relu(out, name='conv6_1')
-
-training = True
-
+    en_parameters += [kernel, biases]
 #deconv6
 with tf.variable_scope('deconv6') as scope:
-    kernel = tf.Variable(tf.truncated_normal([1, 1, 512, 512], dtype=tf.float32,
+    kernel = tf.Variable(tf.truncated_normal([1, 1, 4096, 512], dtype=tf.float32,
                                              stddev=1e-1), name='weights')
     conv = tf.nn.conv2d(conv6_1, kernel, [1, 1, 1, 1], padding='SAME')
     biases = tf.Variable(tf.constant(0.0, shape=[512], dtype=tf.float32),
                          trainable=True, name='biases')
     out = tf.nn.bias_add(conv, biases)
     deconv6 = tf.nn.relu(tf.layers.batch_normalization(out,training=training), name='deconv6')
-    
+
+#deconv5_1/unpooling
 deconv5_1 = unpool(deconv6,pool_parameters[-1])
-    
+
 #deconv5_2
 with tf.variable_scope('deconv5_2') as scope:
     kernel = tf.Variable(tf.truncated_normal([5, 5, 512, 512], dtype=tf.float32,
@@ -252,6 +257,7 @@ with tf.variable_scope('deconv5_2') as scope:
     out = tf.nn.bias_add(conv, biases)
     deconv5_2 = tf.nn.relu(tf.layers.batch_normalization(out,training=training), name='deconv5_2')
 
+#deconv4_1/unpooling
 deconv4_1 = unpool(deconv5_2,pool_parameters[-2])
 
 #deconv4_2
@@ -264,6 +270,7 @@ with tf.variable_scope('deconv4_2') as scope:
     out = tf.nn.bias_add(conv, biases)
     deconv4_2 = tf.nn.relu(tf.layers.batch_normalization(out,training=training), name='deconv4_2')
 
+#deconv3_1/unpooling
 deconv3_1 = unpool(deconv4_2,pool_parameters[-3])
 
 #deconv3_2
@@ -276,6 +283,7 @@ with tf.variable_scope('deconv3_2') as scope:
     out = tf.nn.bias_add(conv, biases)
     deconv3_2 = tf.nn.relu(tf.layers.batch_normalization(out,training=training), name='deconv3_2')
 
+#deconv2_1/unpooling
 deconv2_1 = unpool(deconv3_2,pool_parameters[-4])
 
 #deconv2_2
@@ -288,6 +296,7 @@ with tf.variable_scope('deconv2_2') as scope:
     out = tf.nn.bias_add(conv, biases)
     deconv2_2 = tf.nn.relu(tf.layers.batch_normalization(out,training=training), name='deconv2_2')
 
+#deconv1_1/unpooling
 deconv1_1 = unpool(deconv2_2,pool_parameters[-5])
 
 #deconv1_2
@@ -301,10 +310,18 @@ with tf.variable_scope('deconv1_2') as scope:
     deconv1_2 = tf.nn.relu(tf.layers.batch_normalization(out,training=training), name='deconv1_2')
 #pred_alpha_matte
 with tf.variable_scope('pred_alpha') as scope:
-    outputs = tf.layers.conv2d_transpose(deconv1_2, 1, [5, 5], strides=(1, 1), padding='SAME', kernel_initializer=tf.contrib.layers.xavier_initializer())
-    pred_mattes = tf.nn.sigmoid(outputs)
+    kernel = tf.Variable(tf.truncated_normal([5, 5, 64, 1], dtype=tf.float32,
+                                             stddev=1e-1), name='weights')
+    conv = tf.nn.conv2d(deconv1_2, kernel, [1, 1, 1, 1], padding='SAME')
+    biases = tf.Variable(tf.constant(0.0, shape=[1], dtype=tf.float32),
+                         trainable=True, name='biases')
+    out = tf.nn.bias_add(conv, biases)
+    pred_mattes = tf.nn.sigmoid(out)
 
-wl = tf.where(tf.equal(b_trimap,128), tf.fill([train_batch_size,image_size,image_size,1],1.), tf.fill([train_batch_size,image_size,image_size,1], 0.5))
+tf.add_to_collection("pred_mattes", pred_mattes)
+
+wl = tf.where(tf.equal(b_trimap,128),tf.fill([train_batch_size,image_size,image_size,1],1.),tf.fill([train_batch_size,image_size,image_size,1],0.))
+unknown_region_size = tf.reduce_sum(wl)
 
 tf.summary.image('pred_mattes',pred_mattes,max_outputs = 5)
 alpha_diff = tf.sqrt(tf.square(pred_mattes - GT_matte_batch)+ 1e-12)
@@ -316,10 +333,10 @@ b_GTFG.set_shape([train_batch_size,image_size,image_size,3])
 raw_RGBs.set_shape([train_batch_size,image_size,image_size,3])
 b_GTmatte.set_shape([train_batch_size,image_size,image_size,1])
 
-pred_final =  tf.where(tf.equal(b_trimap,128), pred_mattes, b_trimap/255.0)
+pred_final =  tf.where(tf.equal(b_trimap,128), pred_mattes,b_trimap/255.0)
 tf.summary.image('pred_final',pred_final,max_outputs = 5)
 
-l_matte = tf.unstack(pred_mattes)
+l_matte = tf.unstack(pred_final)
 BG = tf.unstack(b_GTBG)
 FG = tf.unstack(b_GTFG)
 
@@ -327,13 +344,11 @@ for i in range(train_batch_size):
     p_RGB.append(l_matte[i] * FG[i] + (tf.constant(1.) - l_matte[i]) * BG[i])
 pred_RGB = tf.stack(p_RGB)
 
-tf.summary.image('pred_RGB', pred_RGB, max_outputs = 5)
-#c_diff = tf.sqrt(tf.square(pred_RGB/255.0 - raw_RGBs/255.0) + 1e-12)
-# changed 201709
-c_diff = tf.sqrt(tf.square(pred_RGB - raw_RGBs) + 1e-12) / 255.0
+tf.summary.image('pred_RGB',pred_RGB,max_outputs = 5)
+c_diff = tf.sqrt(tf.square(pred_RGB - raw_RGBs) + 1e-12)/255.0
 
-alpha_loss = tf.reduce_sum(alpha_diff * wl)/(tf.reduce_sum(wl))
-comp_loss = tf.reduce_sum(c_diff * wl)/(tf.reduce_sum(wl))
+alpha_loss = tf.reduce_sum(alpha_diff * wl)/(unknown_region_size)
+comp_loss = tf.reduce_sum(c_diff * wl)/(unknown_region_size)
 
 # tf.summary.image('alpha_diff',alpha_diff * wl_alpha,max_outputs = 5)
 # tf.summary.image('c_diff',c_diff * wl_RGB,max_outputs = 5)
@@ -354,7 +369,7 @@ coord = tf.train.Coordinator()
 summary_op = tf.summary.merge_all()
 summary_writer = tf.summary.FileWriter(log_dir, tf.get_default_graph())
 
-gpu_options = tf.GPUOptions(per_process_gpu_memory_fraction = 0.45)
+gpu_options = tf.GPUOptions(per_process_gpu_memory_fraction = 0.6)
 with tf.Session(config=tf.ConfigProto(gpu_options = gpu_options)) as sess:
     sess.run(tf.global_variables_initializer())
     tf.train.start_queue_runners(coord=coord,sess=sess)
@@ -365,22 +380,24 @@ with tf.Session(config=tf.ConfigProto(gpu_options = gpu_options)) as sess:
         weights = np.load(model_path)
         keys = sorted(weights.keys())
         for i, k in enumerate(keys):
-            if i == 26:
+            if i == 28:
                 break
             if k == 'conv1_1_W':  
                 sess.run(en_parameters[i].assign(np.concatenate([weights[k],np.zeros([3,3,1,64])],axis = 2)))
             else:
-                sess.run(en_parameters[i].assign(weights[k]))
+                if k=='fc6_W':
+                    tmp = np.reshape(weights[k],(7,7,512,4096))
+                    sess.run(en_parameters[i].assign(tmp))
+                else:
+                    sess.run(en_parameters[i].assign(weights[k]))
         print('finish loading vgg16 model')
     else:
         print('Restoring pretrained model...')
         saver.restore(sess,tf.train.latest_checkpoint('./model'))
     sess.graph.finalize()
 
-    while epoch_num < max_epochs:
-        print('epoch %d' % epoch_num)   
+    while epoch_num < max_epochs:  
         while batch_num < batchs_per_epoch:
-            print('batch %d, loading batch data...' % batch_num)
             batch_index = sess.run(index_dequeue_op)
 
             batch_alpha_paths = paths_alpha[batch_index]
@@ -388,18 +405,19 @@ with tf.Session(config=tf.ConfigProto(gpu_options = gpu_options)) as sess:
             batch_BG_paths = paths_BG[batch_index]
             batch_RGBs,batch_trimaps,batch_alphas,batch_BGs,batch_FGs,RGBs_with_mean = load_data(batch_alpha_paths,batch_eps_paths,batch_BG_paths)
 
-            feed = {image_batch:batch_RGBs, GT_matte_batch:batch_alphas,GT_trimap:batch_trimaps, GTBG_batch:batch_BGs, GTFG_batch:batch_FGs,raw_RGBs:RGBs_with_mean}
+            feed = {image_batch:batch_RGBs, GT_matte_batch:batch_alphas,GT_trimap:batch_trimaps, GTBG_batch:batch_BGs, GTFG_batch:batch_FGs,raw_RGBs:RGBs_with_mean,training:True}
 
             _,loss,summary_str,step= sess.run([train_op,total_loss,summary_op,global_step],feed_dict = feed)
-            print('loss is %f' %loss)
-            
+            print('epoch %d   batch %d   loss is %f' %(epoch_num,batch_num,loss))
+
             if step%200 == 0:
                 print('saving model......')
                 saver.save(sess,'./model/model.ckpt',global_step = step, write_meta_graph = False)
 
                 print('test on validation data...')
+                test_RGBs,test_trimaps,test_alphas,all_shape,image_paths,trimap_size= load_alphamatting_data(test_dir)
                 vali_diff = []
-                test_RGBs,test_trimaps,test_alphas,all_shape,image_paths = load_validation_data(validation_dir)
+                
                 for i in range(len(test_RGBs)):
                     test_RGB = np.expand_dims(test_RGBs[i],0)
                     test_trimap = np.expand_dims(test_trimaps[i],0)
@@ -407,11 +425,11 @@ with tf.Session(config=tf.ConfigProto(gpu_options = gpu_options)) as sess:
                     shape_i = all_shape[i]
                     image_path = image_paths[i]
                     
-                    feed = {image_batch:test_RGB,GT_trimap:test_trimap}
-                    test_out = sess.run(pred_mattes,feed_dict = feed)
+                    feed = {image_batch:test_RGB,GT_trimap:test_trimap,training:False}
+                    test_out = sess.run(pred_final,feed_dict = feed)
                     
                     i_out = misc.imresize(test_out[0,:,:,0],shape_i)
-                    vali_diff.append(np.sum(np.abs(i_out/255.0-test_alpha))/(shape_i[0]*shape_i[1]))
+                    vali_diff.append(np.sum(np.abs(i_out/255.0-test_alpha))/trimap_size[i])
                     misc.imsave(os.path.join(test_outdir,image_path),i_out)
                 
                 vali_loss = np.mean(vali_diff)
